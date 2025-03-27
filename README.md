@@ -1,7 +1,8 @@
 # SoftFill Pipeline
 
-SoftFill is a diffusers pipeline that integrates established inpainting and differential diffusion techniques to generate and refine images. This pipeline is designed to leverage the InPaint phase for generating rough content and the DiffDiff phase for refining and blending that content seamlessly with the original image.
-This is modified from the base pipeline -> Diffuser 'pipeline_stable_diffusion_xl_inpaint.py'.
+SoftFill is a diffusers pipeline that integrates established inpainting and differential diffusion techniques to generate and refine images. This pipeline is designed to leverage an InPaint phase for generating rough content and a DiffDiff phase for refining and blending that content seamlessly with the original image.
+
+This is modified from the base pipeline -> Diffusers 'pipeline_stable_diffusion_xl_inpaint.py'.
 This implements Differential Diffusion, which is a map-gated img2img method proposed by https://github.com/exx8
 
 ## Overview
