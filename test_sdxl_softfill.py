@@ -19,11 +19,11 @@ image = Image.open("image.png").convert("RGB")
 mask_image = Image.open("mask_image.png").convert("RGB")
 
 # Set generation parameters
-prompt = "closeup girl with red hair and blue eyes, wearing yellow dress with floral pattern, background forest"
-negative_prompt = "nude, nsfw, facing away, cropped, crown, hat"
-num_inference_steps = 60
-strength = 0.8
-guidance_scale = 6
+prompt = "wearing yellow dress flower pattern, up-close girl with red hair, green eyes, gentle smile, wearing yellow dress flower pattern, background forest"
+negative_prompt = "deformed, nude, nsfw, facing away, cropped, crown, hat"
+num_inference_steps = 30
+strength = 0.9
+guidance_scale = 4
 
 # Get dimensions of nput image
 width, height = image.size

@@ -95,7 +95,7 @@ EXAMPLE_DOC_STRING = """
 
 def get_inpaint_steps(num_inference_steps: int) -> int:
     # Could use a more effective method for determining appropriate number of inpaint steps.
-    return math.floor(num_inference_steps / 3)
+    return math.floor(num_inference_steps)
 
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.rescale_noise_cfg
 def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
@@ -1616,9 +1616,6 @@ class StableDiffusionXLSoftfillPipeline(
             inpaint_latents = merge_mask * inpaint_latents + (1 - merge_mask) * image_latents
 
         # --- DiffDiff Scheduling & Processing ---
-        # After running the inpainting denoising loop (using the inpaint_scheduler),
-        # there may be remaining diffusion steps (diffdiff_steps) that need to be processed.
-        # The idea is to further refine the output by applying additional denoising steps.
         diffdiff_steps = num_inference_steps - inpaint_steps
         if diffdiff_steps > 0:
             # Create a new scheduler instance for DiffDiff steps.
