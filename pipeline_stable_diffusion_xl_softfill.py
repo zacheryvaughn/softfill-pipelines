@@ -1584,7 +1584,7 @@ class StableDiffusionXLSoftfillPipeline(
         map_tensor = map_tensor.to(device)
 
         # Decide on phase step counts.
-        inpaint_steps = num_inference_steps // 1 # comment out to run inpaint only
+        inpaint_steps = num_inference_steps // 3
         diffdiff_steps = num_inference_steps - inpaint_steps
 
         # Use one scheduler instance and set timesteps for the total number of steps.
