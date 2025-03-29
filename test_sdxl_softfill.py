@@ -9,7 +9,7 @@ torch_dtype = torch.float16 if device in ["cuda", "mps"] else torch.float32
 # Load Pipeline
 print("Loading pipeline...")
 pipeline = StableDiffusionXLSoftfillPipeline.from_single_file(
-    "SDXL_Anime.safetensors", # Add your model here.
+    "SDXL_Anime.safetensors", # Add model here.
     torch_dtype=torch_dtype,
     use_safetensors=True,
 ).to(device)

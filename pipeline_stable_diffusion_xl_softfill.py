@@ -13,8 +13,6 @@
 # limitations under the License.
 
 import copy
-import math
-
 import inspect
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -37,10 +35,11 @@ from diffusers.loaders import (
     StableDiffusionXLLoraLoaderMixin,
     TextualInversionLoaderMixin,
 )
-
 from diffusers.models import AutoencoderKL, ImageProjection, UNet2DConditionModel
-from diffusers.models.attention_processor import AttnProcessor2_0, XFormersAttnProcessor
-
+from diffusers.models.attention_processor import (
+    AttnProcessor2_0,
+    XFormersAttnProcessor,
+)
 from diffusers.models.lora import adjust_lora_scale_text_encoder
 from diffusers.schedulers import KarrasDiffusionSchedulers
 from diffusers.utils import (
@@ -53,7 +52,6 @@ from diffusers.utils import (
     scale_lora_layers,
     unscale_lora_layers,
 )
-
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline, StableDiffusionMixin
 from diffusers.pipelines.stable_diffusion_xl.pipeline_output import StableDiffusionXLPipelineOutput
@@ -61,7 +59,15 @@ from diffusers.pipelines.stable_diffusion_xl.pipeline_output import StableDiffus
 if is_invisible_watermark_available():
     from diffusers.pipelines.stable_diffusion_xl.watermark import StableDiffusionXLWatermarker
 
-logger = logging.get_logger(__name__)
+if is_torch_xla_available():
+    import torch_xla.core.xla_model as xm
+
+    XLA_AVAILABLE = True
+else:
+    XLA_AVAILABLE = False
+
+
+logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
 EXAMPLE_DOC_STRING = """
@@ -93,10 +99,6 @@ EXAMPLE_DOC_STRING = """
 """
 
 
-def get_inpaint_steps(num_inference_steps: int) -> int:
-    # Could use a more effective method for determining appropriate number of inpaint steps.
-    return math.floor(num_inference_steps)
-
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.rescale_noise_cfg
 def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
     r"""
@@ -123,8 +125,9 @@ def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
     noise_cfg = guidance_rescale * noise_pred_rescaled + (1 - guidance_rescale) * noise_cfg
     return noise_cfg
 
-# Preprocess mask for inpaint operation
+
 def mask_pil_to_torch(mask, height, width):
+    # preprocess mask
     if isinstance(mask, (PIL.Image.Image, np.ndarray)):
         mask = [mask]
 
@@ -138,6 +141,7 @@ def mask_pil_to_torch(mask, height, width):
     mask = torch.from_numpy(mask)
     return mask
 
+
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.retrieve_latents
 def retrieve_latents(
     encoder_output: torch.Tensor, generator: Optional[torch.Generator] = None, sample_mode: str = "sample"
@@ -150,6 +154,7 @@ def retrieve_latents(
         return encoder_output.latents
     else:
         raise AttributeError("Could not access latents of provided encoder_output")
+
 
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.retrieve_timesteps
 def retrieve_timesteps(
@@ -209,6 +214,7 @@ def retrieve_timesteps(
         scheduler.set_timesteps(num_inference_steps, device=device, **kwargs)
         timesteps = scheduler.timesteps
     return timesteps, num_inference_steps
+
 
 class StableDiffusionXLSoftfillPipeline(
     DiffusionPipeline,
@@ -317,14 +323,9 @@ class StableDiffusionXLSoftfillPipeline(
         self.register_to_config(requires_aesthetics_score=requires_aesthetics_score)
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
-        self.mask_processor = VaeImageProcessor(
-            # !Important: do_binarize=False, because the mask should have a binarization split at 0.8. This ensures that diffdiff has plenty of overlap, makes a big difference!
-            vae_scale_factor=self.vae_scale_factor, do_normalize=False, do_binarize=False, do_convert_grayscale=True
-        )
-        self.diffdiff_mask_processor = VaeImageProcessor(
-            # Don't want to binarize the diffdiff mask, it has it's own thresholding method
-            vae_scale_factor=self.vae_scale_factor, do_normalize=False, do_binarize=False, do_convert_grayscale=True
-        )
+        # inpaint mask is binarized later, split at 0.8, diffdiff mask should not be binarized
+        self.mask_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor, do_normalize=False, do_binarize=False, do_convert_grayscale=True)
+        self.diffdiff_mask_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor, do_normalize=False, do_binarize=False, do_convert_grayscale=True)
 
         add_watermarker = add_watermarker if add_watermarker is not None else is_invisible_watermark_available()
 
@@ -1013,15 +1014,33 @@ class StableDiffusionXLSoftfillPipeline(
             self.vae.decoder.conv_in.to(dtype)
             self.vae.decoder.mid_block.to(dtype)
 
-    def get_guidance_scale_embedding(self, w: torch.Tensor, embedding_dim: int = 512, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    # Copied from diffusers.pipelines.latent_consistency_models.pipeline_latent_consistency_text2img.LatentConsistencyModelPipeline.get_guidance_scale_embedding
+    def get_guidance_scale_embedding(
+        self, w: torch.Tensor, embedding_dim: int = 512, dtype: torch.dtype = torch.float32
+    ) -> torch.Tensor:
+        """
+        See https://github.com/google-research/vdm/blob/dc27b98a554f65cdc654b800da5aa1846545d41b/model_vdm.py#L298
+
+        Args:
+            w (`torch.Tensor`):
+                Generate embedding vectors with a specified guidance scale to subsequently enrich timestep embeddings.
+            embedding_dim (`int`, *optional*, defaults to 512):
+                Dimension of the embeddings to generate.
+            dtype (`torch.dtype`, *optional*, defaults to `torch.float32`):
+                Data type of the generated embeddings.
+
+        Returns:
+            `torch.Tensor`: Embedding vectors with shape `(len(w), embedding_dim)`.
+        """
         assert len(w.shape) == 1
         w = w * 1000.0
+
         half_dim = embedding_dim // 2
         emb = torch.log(torch.tensor(10000.0)) / (half_dim - 1)
         emb = torch.exp(torch.arange(half_dim, dtype=dtype) * -emb)
         emb = w.to(dtype)[:, None] * emb[None, :]
         emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
-        if embedding_dim % 2 == 1:
+        if embedding_dim % 2 == 1:  # zero pad
             emb = torch.nn.functional.pad(emb, (0, 1))
         assert emb.shape == (w.shape[0], embedding_dim)
         return emb
@@ -1038,6 +1057,9 @@ class StableDiffusionXLSoftfillPipeline(
     def clip_skip(self):
         return self._clip_skip
 
+    # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
+    # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
+    # corresponds to doing no classifier free guidance.
     @property
     def do_classifier_free_guidance(self):
         return self._guidance_scale > 1 and self.unet.config.time_cond_proj_dim is None
@@ -1385,7 +1407,7 @@ class StableDiffusionXLSoftfillPipeline(
         # 4. set timesteps
         def denoising_value_valid(dnv):
             return isinstance(dnv, float) and 0 < dnv < 1
-        
+
         timesteps, num_inference_steps = retrieve_timesteps(
             self.scheduler, num_inference_steps, device, timesteps, sigmas
         )
@@ -1405,7 +1427,7 @@ class StableDiffusionXLSoftfillPipeline(
         latent_timestep = timesteps[:1].repeat(batch_size * num_images_per_prompt)
         # create a boolean to check if the strength is set to 1. if so then initialise the latents with pure noise
         is_strength_max = strength == 1.0
-        
+
         # 5. Preprocess mask and image
         if padding_mask_crop is not None:
             crops_coords = self.mask_processor.get_crop_region(mask_image, width, height, pad=padding_mask_crop)
@@ -1413,7 +1435,7 @@ class StableDiffusionXLSoftfillPipeline(
         else:
             crops_coords = None
             resize_mode = "default"
-        
+
         original_image = image
         init_image = self.image_processor.preprocess(
             image, height=height, width=width, crops_coords=crops_coords, resize_mode=resize_mode
@@ -1423,19 +1445,11 @@ class StableDiffusionXLSoftfillPipeline(
         mask = self.mask_processor.preprocess(
             mask_image, height=height, width=width, resize_mode=resize_mode, crops_coords=crops_coords
         )
-        # Manually apply 0.8 threshold to the mask, this pulls the inpaint mask 'in' a bit so diffdiff's map overlaps it more.
-        mask = (mask > 0.8).to(mask.dtype)
-
-        map_tensor = self.diffdiff_mask_processor.preprocess(mask_image, height=height, width=width, resize_mode=resize_mode, crops_coords=crops_coords)
-        map_tensor = 1 - map_tensor
-        latent_height = height // self.vae_scale_factor
-        latent_width = width // self.vae_scale_factor
-        map_tensor = torch.nn.functional.interpolate(map_tensor, size=(latent_height, latent_width), mode='bilinear', align_corners=False)
-        map_tensor = map_tensor.to(device)
 
         if masked_image_latents is not None:
             masked_image = masked_image_latents
         elif init_image.shape[1] == 4:
+            # if images are in latent space, we can't mask it
             masked_image = None
         else:
             masked_image = init_image * (mask < 0.5)
@@ -1443,7 +1457,7 @@ class StableDiffusionXLSoftfillPipeline(
         # 6. Prepare latent variables
         num_channels_latents = self.vae.config.latent_channels
         num_channels_unet = self.unet.config.in_channels
-        return_image_latents = (num_channels_unet == 4)
+        return_image_latents = num_channels_unet == 4
 
         add_noise = True if self.denoising_start is None else False
         latents_outputs = self.prepare_latents(
@@ -1463,13 +1477,11 @@ class StableDiffusionXLSoftfillPipeline(
             return_image_latents=return_image_latents,
         )
 
-        inpaint_steps = get_inpaint_steps(num_inference_steps)
-
         if return_image_latents:
             latents, noise, image_latents = latents_outputs
         else:
             latents, noise = latents_outputs
-        
+
         # 7. Prepare mask latent variables
         mask, masked_image_latents = self.prepare_mask_latents(
             mask,
@@ -1482,7 +1494,7 @@ class StableDiffusionXLSoftfillPipeline(
             generator,
             self.do_classifier_free_guidance,
         )
-        
+
         # 8. Check that sizes of mask, masked image and latents match
         if num_channels_unet == 9:
             # default case for runwayml/stable-diffusion-inpainting
@@ -1557,150 +1569,231 @@ class StableDiffusionXLSoftfillPipeline(
             )
 
 
+        # -----------------
+        # INITIAL PREPERATIONS
+        mask = (mask > 0.8).to(mask.dtype)
+        map_tensor = self.diffdiff_mask_processor.preprocess(mask_image, height=height, width=width, resize_mode=resize_mode, crops_coords=crops_coords)
+        map_tensor = 1 - map_tensor
+        latent_height = height // self.vae_scale_factor
+        latent_width = width // self.vae_scale_factor
+        map_tensor = torch.nn.functional.interpolate(map_tensor, size=(latent_height, latent_width), mode='bilinear', align_corners=False)
+        map_tensor = map_tensor.to(device)
+        inpaint_steps = num_inference_steps // 3  
+        diffdiff_steps = num_inference_steps - inpaint_steps
         inpaint_scheduler = copy.deepcopy(self.scheduler)
         inpaint_scheduler.set_timesteps(num_inference_steps=inpaint_steps, device=device)
 
-        # 11. InPaint Denoise Schedule
+        # inpaint_scheduler.timesteps is not the issue.
+        # the issue is with inpaint_scheduler itself... perhaps deepcopy is the cause
+
+
+        # -----------------
+        # INPAINT PHASE
+        num_warmup_steps = max(len(timesteps) - inpaint_steps * self.scheduler.order, 0)
+
+        if (
+            self.denoising_end is not None
+            and self.denoising_start is not None
+            and denoising_value_valid(self.denoising_end)
+            and denoising_value_valid(self.denoising_start)
+            and self.denoising_start >= self.denoising_end
+        ):
+            raise ValueError(
+                f"`denoising_start`: {self.denoising_start} cannot be larger than or equal to `denoising_end`: {self.denoising_end}"
+            )
+        elif self.denoising_end is not None and denoising_value_valid(self.denoising_end):
+            discrete_timestep_cutoff = int(
+                round(
+                    self.scheduler.config.num_train_timesteps
+                    - (self.denoising_end * self.scheduler.config.num_train_timesteps)
+                )
+            )
+            num_inference_steps = len(list(filter(lambda ts: ts >= discrete_timestep_cutoff, timesteps)))
+            timesteps = timesteps[:num_inference_steps]
+
+        # 11.1 Optionally get Guidance Scale Embedding
+        timestep_cond = None
+        if self.unet.config.time_cond_proj_dim is not None:
+            guidance_scale_tensor = torch.tensor(self.guidance_scale - 1).repeat(batch_size * num_images_per_prompt)
+            timestep_cond = self.get_guidance_scale_embedding(
+                guidance_scale_tensor, embedding_dim=self.unet.config.time_cond_proj_dim
+            ).to(device=device, dtype=latents.dtype)
+
+        self._num_timesteps = len(timesteps)
+
+
+        # -----------------
+        # INPAINT LOOP
         with self.progress_bar(total=inpaint_steps) as inpaint_pbar:
             inpaint_pbar.set_description("InPaint")
             for i, t in enumerate(inpaint_scheduler.timesteps):
                 if self.interrupt:
                     continue
+                # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
-                latent_model_input = inpaint_scheduler.scale_model_input(latent_model_input, t)
+
+                # concat latents, mask, masked_image_latents in the channel dimension
+                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+
                 if num_channels_unet == 9:
                     latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
+
+                # predict the noise residual
                 added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
                 if ip_adapter_image is not None or ip_adapter_image_embeds is not None:
                     added_cond_kwargs["image_embeds"] = image_embeds
-                noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=prompt_embeds, 
-                                         timestep_cond=None if self.unet.config.time_cond_proj_dim is None else 
-                                         self.get_guidance_scale_embedding(torch.tensor(self.guidance_scale - 1).repeat(batch_size * num_images_per_prompt), embedding_dim=self.unet.config.time_cond_proj_dim).to(device=device, dtype=latents.dtype),
-                                         cross_attention_kwargs=self.cross_attention_kwargs, added_cond_kwargs=added_cond_kwargs, return_dict=False)[0]
+                noise_pred = self.unet(
+                    latent_model_input,
+                    t,
+                    encoder_hidden_states=prompt_embeds,
+                    timestep_cond=timestep_cond,
+                    cross_attention_kwargs=self.cross_attention_kwargs,
+                    added_cond_kwargs=added_cond_kwargs,
+                    return_dict=False,
+                )[0]
+
+                # perform guidance
                 if self.do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+
                 if self.do_classifier_free_guidance and self.guidance_rescale > 0.0:
+                    # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
                     noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=self.guidance_rescale)
+
+                # compute the previous noisy sample x_t -> x_t-1
                 latents_dtype = latents.dtype
-                latents = inpaint_scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
                 if latents.dtype != latents_dtype:
                     if torch.backends.mps.is_available():
+                        # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
                         latents = latents.to(latents_dtype)
+
                 if num_channels_unet == 4:
                     init_latents_proper = image_latents
                     if self.do_classifier_free_guidance:
                         init_mask, _ = mask.chunk(2)
                     else:
                         init_mask = mask
-                    if i < inpaint_steps - 1:
+
+                    if i < len(inpaint_scheduler.timesteps) - 1:
                         noise_timestep = inpaint_scheduler.timesteps[i + 1]
-                        init_latents_proper = inpaint_scheduler.add_noise(init_latents_proper, noise, torch.tensor([noise_timestep]).to(device))
+                        init_latents_proper = self.scheduler.add_noise(
+                            init_latents_proper, noise, torch.tensor([noise_timestep])
+                        )
+
                     latents = (1 - init_mask) * init_latents_proper + init_mask * latents
+
                 if callback_on_step_end is not None:
-                    callback_kwargs = {k: locals()[k] for k in callback_on_step_end_tensor_inputs}
+                    callback_kwargs = {}
+                    for k in callback_on_step_end_tensor_inputs:
+                        callback_kwargs[k] = locals()[k]
                     callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
+
                     latents = callback_outputs.pop("latents", latents)
                     prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-                    negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
                     add_text_embeds = callback_outputs.pop("add_text_embeds", add_text_embeds)
                     add_time_ids = callback_outputs.pop("add_time_ids", add_time_ids)
-                inpaint_pbar.update(1)
-                if i == inpaint_steps - 1:
-                    inpaint_latents = latents.clone()
+                    mask = callback_outputs.pop("mask", mask)
+                    masked_image_latents = callback_outputs.pop("masked_image_latents", masked_image_latents)
 
+                # call the callback, if provided
+                if i == len(inpaint_scheduler.timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                    inpaint_pbar.update()
+                    if callback is not None and i % callback_steps == 0:
+                        step_idx = i // getattr(self.scheduler, "order", 1)
+                        callback(step_idx, t, latents)
+
+                if XLA_AVAILABLE:
+                    xm.mark_step()
+
+
+        # -----------------
+        # DIFFDIFF PHASE
+        # Uses final InPaint latent merged with original image latent to preserve quality.
         if num_channels_unet == 4:
-            merge_mask = mask
-            if self.do_classifier_free_guidance:
-                merge_mask, _ = mask.chunk(2)
-            inpaint_latents = merge_mask * inpaint_latents + (1 - merge_mask) * image_latents
+            merge_mask = mask.chunk(2)[0] if self.do_classifier_free_guidance else mask
+            inpaint_latents = merge_mask * latents + (1 - merge_mask) * image_latents
+        else:
+            inpaint_latents = latents
 
-        # --- DiffDiff Scheduling & Processing ---
-        diffdiff_steps = num_inference_steps - inpaint_steps
+        # Use the inpaint phase output as the starting point for DiffDiff
+        latents = inpaint_latents
+
         if diffdiff_steps > 0:
             # Create a new scheduler instance for DiffDiff steps.
             diffdiff_scheduler = copy.deepcopy(self.scheduler)
             diffdiff_scheduler.set_timesteps(num_inference_steps=diffdiff_steps, device=device)
-            
+
             # For each DiffDiff timestep, add noise to the inpainted latents.
-            # This creates a stack of latent representations, each corresponding to
-            # the inpaint latents with progressively added noise.
             original_with_noise_list = []
             for t_dd in diffdiff_scheduler.timesteps:
                 noise_dd = randn_tensor(inpaint_latents.shape, generator=generator, device=device, dtype=latents.dtype)
                 latents_noisy = diffdiff_scheduler.add_noise(inpaint_latents, noise_dd, torch.tensor([t_dd]).to(device))
                 original_with_noise_list.append(latents_noisy)
             original_with_noise = torch.stack(original_with_noise_list, dim=0)
-            
-            # Process the mask used to control how much noise is blended in during DiffDiff.
-            # The map_tensor (after processing) is used to determine a threshold at each DiffDiff step.
-            # The thresholds increase linearly from 0 to 1 across the diffdiff_steps.
+
+            # Process the map used to control noise blending.
             map_tensor = map_tensor.squeeze()
             while len(map_tensor.shape) > 2:
                 map_tensor = map_tensor.squeeze(0)
-            
             thresholds = torch.arange(diffdiff_steps, dtype=map_tensor.dtype, device=device) / diffdiff_steps
             thresholds = thresholds.view(-1, 1, 1)
             expanded_map = map_tensor.expand(diffdiff_steps, *map_tensor.shape)
-            
-            # Create binary masks at each DiffDiff step by comparing the expanded map with the threshold.
-            # This decides, for each pixel, whether to favor the noisy version or the current latent value.
-            masks = expanded_map > (thresholds + (denoising_start or 0))
-            
-            # Run the DiffDiff denoising loop.
-            # For each DiffDiff step:
-            #   - Blend the noisy latent (from original_with_noise) with the current latent based on the computed mask.
-            #   - Scale the model input appropriately.
-            #   - Pass through the UNet to predict noise, then update the latents.
-            # This extra loop helps to progressively remove added noise while respecting the spatial mask.
+            masks = expanded_map > (thresholds + (self.denoising_start or 0))
+
+
+            # -----------------
+            # DIFFDIFF LOOP
             with self.progress_bar(total=diffdiff_steps) as diffdiff_pbar:
                 diffdiff_pbar.set_description("DiffDiff")
                 for j, t in enumerate(diffdiff_scheduler.timesteps):
                     if self.interrupt:
                         continue
-                    
-                    # Extract the binary mask for the current DiffDiff step.
-                    mask = masks[j]
-                    mask = mask.unsqueeze(0).unsqueeze(0).expand(latents.shape[0], 1, -1, -1).to(latents.dtype)
-                    
-                    # Blend the latent: use the noisy version where the mask is active, otherwise keep the current latent.
-                    latents = original_with_noise[j] * mask + latents * (1 - mask)
-                    
-                    # Prepare input for the UNet (duplicating if using classifier-free guidance) and scale it.
+
+                    # Get the binary mask for this DiffDiff step.
+                    current_mask = masks[j]
+                    current_mask = current_mask.unsqueeze(0).unsqueeze(0).expand(latents.shape[0], 1, -1, -1).to(latents.dtype)
+
+                    # Blend the latent: use the noisy version where mask is active.
+                    latents = original_with_noise[j] * current_mask + latents * (1 - current_mask)
+
+                    # Prepare input for the UNet.
                     latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
                     latent_model_input = diffdiff_scheduler.scale_model_input(latent_model_input, t)
-                    
                     added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
                     if ip_adapter_image is not None or ip_adapter_image_embeds is not None:
                         added_cond_kwargs["image_embeds"] = image_embeds
-                        
-                    # Run the UNet for the DiffDiff step and update latents accordingly.
+
                     noise_pred = self.unet(
-                        latent_model_input, t, encoder_hidden_states=prompt_embeds,
-                        timestep_cond=None if self.unet.config.time_cond_proj_dim is None else 
+                        latent_model_input,
+                        t,
+                        encoder_hidden_states=prompt_embeds,
+                        timestep_cond=(
+                            None if self.unet.config.time_cond_proj_dim is None else 
                             self.get_guidance_scale_embedding(
                                 torch.tensor(self.guidance_scale - 1).repeat(batch_size * num_images_per_prompt),
                                 embedding_dim=self.unet.config.time_cond_proj_dim
-                            ).to(device=device, dtype=latents.dtype),
+                            ).to(device=device, dtype=latents.dtype)
+                        ),
                         cross_attention_kwargs=self.cross_attention_kwargs,
                         added_cond_kwargs=added_cond_kwargs,
                         return_dict=False
                     )[0]
                     if self.do_classifier_free_guidance:
                         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-                    if self.do_classifier_free_guidance and guidance_rescale > 0.0:
-                        noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=guidance_rescale)
-                    
+                        noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+                    if self.do_classifier_free_guidance and self.guidance_rescale > 0.0:
+                        noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=self.guidance_rescale)
+
                     latents_dtype = latents.dtype
                     latents = diffdiff_scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
-                    
                     if latents.dtype != latents_dtype:
                         if torch.backends.mps.is_available():
                             latents = latents.to(latents_dtype)
                         else:
                             raise ValueError("Type-casting error for latents.")
-                    
+
                     if callback_on_step_end is not None:
                         callback_kwargs = {k: locals()[k] for k in callback_on_step_end_tensor_inputs}
                         callback_outputs = callback_on_step_end(self, j, t, callback_kwargs)
@@ -1710,11 +1803,13 @@ class StableDiffusionXLSoftfillPipeline(
                         add_text_embeds = callback_outputs.pop("add_text_embeds", add_text_embeds)
                         add_time_ids = callback_outputs.pop("add_time_ids", add_time_ids)
                     diffdiff_pbar.update(1)
-        
-        # --- VAE Decoding & Final Postprocessing ---
-        # If the output should be an image (not raw latent values):
+
+                    if XLA_AVAILABLE:
+                        xm.mark_step()
+
+
         if not output_type == "latent":
-            # Ensure the VAE is using float32 (if forced upcasting) to avoid precision issues.
+            # make sure the VAE is in float32 mode, as it overflows in float16
             needs_upcasting = self.vae.dtype == torch.float16 and self.vae.config.force_upcast
 
             if needs_upcasting:
@@ -1722,20 +1817,24 @@ class StableDiffusionXLSoftfillPipeline(
                 latents = latents.to(next(iter(self.vae.post_quant_conv.parameters())).dtype)
             elif latents.dtype != self.vae.dtype:
                 if torch.backends.mps.is_available():
+                    # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
                     self.vae = self.vae.to(latents.dtype)
-                else:
-                    raise ValueError("Type-casting error for VAE.")
-                
-            # Adjust the latent representation based on the VAE's mean and standard deviation if provided.
-            if (hasattr(self.vae.config, "latents_mean") and self.vae.config.latents_mean is not None
-                and hasattr(self.vae.config, "latents_std") and self.vae.config.latents_std is not None):
-                latents_mean = torch.tensor(self.vae.config.latents_mean).view(1, 4, 1, 1).to(latents.device, latents.dtype)
-                latents_std = torch.tensor(self.vae.config.latents_std).view(1, 4, 1, 1).to(latents.device, latents.dtype)
+
+            # unscale/denormalize the latents
+            # denormalize with the mean and std if available and not None
+            has_latents_mean = hasattr(self.vae.config, "latents_mean") and self.vae.config.latents_mean is not None
+            has_latents_std = hasattr(self.vae.config, "latents_std") and self.vae.config.latents_std is not None
+            if has_latents_mean and has_latents_std:
+                latents_mean = (
+                    torch.tensor(self.vae.config.latents_mean).view(1, 4, 1, 1).to(latents.device, latents.dtype)
+                )
+                latents_std = (
+                    torch.tensor(self.vae.config.latents_std).view(1, 4, 1, 1).to(latents.device, latents.dtype)
+                )
                 latents = latents * latents_std / self.vae.config.scaling_factor + latents_mean
             else:
                 latents = latents / self.vae.config.scaling_factor
-            
-            # Decode the final latents into an image.
+
             image = self.vae.decode(latents, return_dict=False)[0]
 
             # cast back to fp16 if needed
@@ -1760,3 +1859,4 @@ class StableDiffusionXLSoftfillPipeline(
             return (image,)
 
         return StableDiffusionXLPipelineOutput(images=image)
+
