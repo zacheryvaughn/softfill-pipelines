@@ -25,8 +25,8 @@ mask_image = Image.open("mask_image.png").convert("RGB")
 prompt = "upclose, closeup, brunette girl with green eyes, wearing blue dress with white pattern, background forest"
 negative_prompt = "nude, nsfw"
 num_inference_steps = 30 # inpaint_steps are 1/3 of num_inference_steps
-strength = 1.0 # effective range 0.8 - 1.0
-guidance_scale = 6.5
+strength = 0.9 # effective range 0.8 - 1.0
+guidance_scale = 6
 seed = 123456
 generator = torch.Generator(device=device).manual_seed(seed)
 

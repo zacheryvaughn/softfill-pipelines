@@ -1469,10 +1469,14 @@ class StableDiffusionXLSoftfillPipeline(
         )(diffdiff_mask).to(device)
 
         # Ensure diffdiff_map is properly squeezed to 2D before further operations
-        # This is for later use in the diffdiff phase
         diffdiff_map = diffdiff_map.squeeze()
         while len(diffdiff_map.shape) > 2:
             diffdiff_map = diffdiff_map.squeeze(0)
+
+        # Generate an array of masks based on thresholding the diffdiff_map
+        thresholds = torch.linspace(0, 1, steps=diffdiff_steps, dtype=diffdiff_map.dtype, device=device)
+        thresholds = thresholds.view(-1, 1, 1)  # Shape: [steps, 1, 1]
+        masks = (diffdiff_map.unsqueeze(0) >= thresholds).float()  # Shape: [steps, H, W]
 
         # 6. Prepare latent variables
         num_channels_latents = self.vae.config.latent_channels
@@ -1693,36 +1697,25 @@ class StableDiffusionXLSoftfillPipeline(
                 if XLA_AVAILABLE:
                     xm.mark_step()
 
-        # Merge final inpaint latent with original image latent. Incase there are any compounding inconsistencies.
+        # Merge final inpaint latent with original image latent
         if num_channels_unet == 4:
             merge_mask = mask.chunk(2)[0] if self.do_classifier_free_guidance else mask
             final_inpaint_latents = merge_mask * latents + (1 - merge_mask) * image_latents
         else:
             final_inpaint_latents = latents
 
-
-        # --- DIFFDIFF PHASE SETUP ---
+        # --- DIFFDIFF PHASE ---
         if diffdiff_steps > 0:
             num_warmup_steps_diffdiff = max(len(diffdiff_timesteps) - diffdiff_steps * self.scheduler.order, 0)
-
             self._num_timesteps = len(diffdiff_timesteps)
 
-            # Create thresholds to progressively apply the diffdiff mask.
-            thresholds = torch.arange(diffdiff_steps, dtype=diffdiff_map.dtype, device=device) / diffdiff_steps
-            thresholds = thresholds.view(-1, 1, 1)  # Shape: [steps, 1, 1]
-            
-            # Expand the map for all diffsteps
-            expanded_map = diffdiff_map.expand(diffdiff_steps, *diffdiff_map.shape)  # Shape: [steps, H, W]
-            masks = expanded_map > (thresholds + (denoising_start or 0))  # Shape: [steps, H, W]
-
-            # --- DIFFDIFF PHASE ---
             with self.progress_bar(total=diffdiff_steps) as diffdiff_pbar:
                 diffdiff_pbar.set_description("DiffDiff")
                 for i, t in enumerate(diffdiff_timesteps):
                     if self.interrupt:
                         continue
 
-                    # Properly reshape the mask for this step
+                    # Reshape the mask for this step
                     mask_step = masks[i].unsqueeze(0).unsqueeze(0).to(latents.dtype)  # Shape: [1, 1, H, W]
                     mask_step = mask_step.expand(batch_size, 1, -1, -1)  # Shape: [B, 1, H, W]
 
@@ -1731,7 +1724,7 @@ class StableDiffusionXLSoftfillPipeline(
                         final_inpaint_latents, size=latents.shape[2:], mode="bilinear", align_corners=False
                     )
 
-                    # Apply mask blending with proper broadcasting
+                    # Apply mask blending
                     latents = final_inpaint_for_blend * mask_step + latents * (1 - mask_step)
 
                     # Expand latents for classifier-free guidance
