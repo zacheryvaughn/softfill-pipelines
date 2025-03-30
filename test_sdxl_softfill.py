@@ -2,6 +2,9 @@ import torch
 from PIL import Image
 from pipeline_stable_diffusion_xl_softfill import StableDiffusionXLSoftfillPipeline
 
+# Results currently largely depend on how good your model is at InPainting...
+# Most models will cut off portions of the inpaint, and if it's too extreme then DiffDiff will assume that this is the desired result.
+
 # Determine device and precision
 device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 torch_dtype = torch.float16 if device in ["cuda", "mps"] else torch.float32
@@ -19,11 +22,11 @@ image = Image.open("image.png").convert("RGB")
 mask_image = Image.open("mask_image.png").convert("RGB")
 
 # Set generation parameters
-prompt = "up-close, girl wearing blue dress with white pattern, background forest"
+prompt = "upclose, closeup, brunette girl with green eyes, wearing blue dress with white pattern, background forest"
 negative_prompt = "nude, nsfw"
-num_inference_steps = 30 # 10 or 30
-strength = 0.4
-guidance_scale = 5
+num_inference_steps = 30 # inpaint_steps are 1/3 of num_inference_steps
+strength = 1.0 # effective range 0.8 - 1.0
+guidance_scale = 6.5
 seed = 123456
 generator = torch.Generator(device=device).manual_seed(seed)
 
