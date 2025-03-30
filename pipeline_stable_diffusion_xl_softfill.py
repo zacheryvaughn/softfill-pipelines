@@ -1429,6 +1429,12 @@ class StableDiffusionXLSoftfillPipeline(
         # create a boolean to check if the strength is set to 1. if so then initialise the latents with pure noise
         is_strength_max = strength == 1.0
 
+        # Set Steps and Timesteps
+        inpaint_steps = num_inference_steps // 3 # Or adjust as needed
+        diffdiff_steps = num_inference_steps - inpaint_steps
+        inpaint_timesteps = timesteps[:inpaint_steps]
+        diffdiff_timesteps = timesteps[inpaint_steps:]
+
         # 5. Preprocess mask and image and map
         if padding_mask_crop is not None:
             crops_coords = self.mask_processor.get_crop_region(mask_image, width, height, pad=padding_mask_crop)
@@ -1583,7 +1589,6 @@ class StableDiffusionXLSoftfillPipeline(
             )
 
         # 11. Denoising loop
-        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
 
         if (
             self.denoising_end is not None
@@ -1615,13 +1620,10 @@ class StableDiffusionXLSoftfillPipeline(
             ).to(device=device, dtype=latents.dtype)
 
 
-        # Define step counts and split timesteps
-        inpaint_steps = num_inference_steps // 3 # Or adjust as needed
-        diffdiff_steps = num_inference_steps - inpaint_steps
-        inpaint_timesteps = timesteps[:inpaint_steps]
-        diffdiff_timesteps = timesteps[inpaint_steps:]
 
         # --- INPAINT PHASE ---
+        num_warmup_steps_inpaint = max(len(inpaint_timesteps) - inpaint_steps * self.scheduler.order, 0)
+
         self._num_timesteps = len(inpaint_timesteps)
         with self.progress_bar(total=inpaint_steps) as inpaint_pbar:
             inpaint_pbar.set_description(" InPaint")
@@ -1682,7 +1684,7 @@ class StableDiffusionXLSoftfillPipeline(
                     masked_image_latents = callback_outputs.pop("masked_image_latents", masked_image_latents)
 
                 # Callback update
-                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps_inpaint and (i + 1) % self.scheduler.order == 0):
                     inpaint_pbar.update()
                     if callback is not None and i % callback_steps == 0:
                         step_idx = i // getattr(self.scheduler, "order", 1)
@@ -1691,11 +1693,18 @@ class StableDiffusionXLSoftfillPipeline(
                 if XLA_AVAILABLE:
                     xm.mark_step()
 
-        # Save the final inpaint-phase latents for diffdiff.
-        final_inpaint_latents = latents.clone()
+        # Merge final inpaint latent with original image latent. Incase there are any compounding inconsistencies.
+        if num_channels_unet == 4:
+            merge_mask = mask.chunk(2)[0] if self.do_classifier_free_guidance else mask
+            final_inpaint_latents = merge_mask * latents + (1 - merge_mask) * image_latents
+        else:
+            final_inpaint_latents = latents
+
 
         # --- DIFFDIFF PHASE SETUP ---
         if diffdiff_steps > 0:
+            num_warmup_steps_diffdiff = max(len(diffdiff_timesteps) - diffdiff_steps * self.scheduler.order, 0)
+
             self._num_timesteps = len(diffdiff_timesteps)
 
             # Create thresholds to progressively apply the diffdiff mask.
@@ -1761,7 +1770,7 @@ class StableDiffusionXLSoftfillPipeline(
                         callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
                         latents = callback_outputs.pop("latents", latents)
 
-                    if i == len(diffdiff_timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                    if i == len(diffdiff_timesteps) - 1 or ((i + 1) > num_warmup_steps_diffdiff and (i + 1) % self.scheduler.order == 0):
                         diffdiff_pbar.update()
                         if callback is not None and i % callback_steps == 0:
                             step_idx = i // getattr(self.scheduler, "order", 1)
@@ -1769,10 +1778,6 @@ class StableDiffusionXLSoftfillPipeline(
 
                     if XLA_AVAILABLE:
                         xm.mark_step()
-
-
-
-
 
 
 

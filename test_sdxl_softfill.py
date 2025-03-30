@@ -19,12 +19,12 @@ image = Image.open("image.png").convert("RGB")
 mask_image = Image.open("mask_image.png").convert("RGB")
 
 # Set generation parameters
-prompt = "wearing yellow dress flower pattern, up-close girl with red hair, green eyes, gentle smile, wearing yellow dress flower pattern, background forest"
-negative_prompt = "deformed, nude, nsfw, t-shirt, facing away, cropped, crown, hat"
-num_inference_steps = 60 # 10 or 30
-strength = 0.9
+prompt = "up-close, girl wearing blue dress with white pattern, background forest"
+negative_prompt = "nude, nsfw"
+num_inference_steps = 30 # 10 or 30
+strength = 0.4
 guidance_scale = 5
-seed = 9876543210
+seed = 123456
 generator = torch.Generator(device=device).manual_seed(seed)
 
 # Get dimensions of nput image
