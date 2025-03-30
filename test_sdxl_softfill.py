@@ -21,9 +21,11 @@ mask_image = Image.open("mask_image.png").convert("RGB")
 # Set generation parameters
 prompt = "wearing yellow dress flower pattern, up-close girl with red hair, green eyes, gentle smile, wearing yellow dress flower pattern, background forest"
 negative_prompt = "deformed, nude, nsfw, t-shirt, facing away, cropped, crown, hat"
-num_inference_steps = 60
+num_inference_steps = 60 # 10 or 30
 strength = 0.9
-guidance_scale = 4
+guidance_scale = 5
+seed = 9876543210
+generator = torch.Generator(device=device).manual_seed(seed)
 
 # Get dimensions of nput image
 width, height = image.size
@@ -38,7 +40,8 @@ image = pipeline(
     width=width,
     num_inference_steps=num_inference_steps,
     strength=strength,
-    guidance_scale=guidance_scale
+    guidance_scale=guidance_scale,
+    generator=generator
 ).images[0]
 
 # Save the output
