@@ -15,6 +15,7 @@
 import inspect
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+import cv2 
 import random
 import numpy as np
 import PIL.Image
@@ -1206,9 +1207,17 @@ class StableDiffusionXLSoftFillPipeline(
 
         add_noise = True if denoising_start is None else False
 
-        # 5. PREPARE IMAGES
-        # Fractal Brownian Motion (fbm) function.
+
+
+        # --------------------------------------------
+        # IMAGE PREPARATION UTILITIES
+        # --------------------------------------------
+
         def fbm(x, y, scale, octaves, lacunarity, gain):
+            """
+            Fractal Brownian Motion (fbm) noise generator.
+            Combines multiple octaves of Perlin noise.
+            """
             total = 0.0
             amplitude = 1.0
             frequency = 1.0
@@ -1218,123 +1227,156 @@ class StableDiffusionXLSoftFillPipeline(
                 frequency *= lacunarity
             return total
 
-        # Pattern function using domain warping.
         def pattern(x, y, scale, octaves, lacunarity, gain):
+            """
+            Domain-warped pattern using fbm.
+            Warps coordinates before applying final fbm call.
+            """
             q0 = fbm(x, y, scale, octaves, lacunarity, gain)
             q1 = fbm(x + 5.2, y + 1.3, scale, octaves, lacunarity, gain)
             return fbm(x + 80.0 * q0, y + 80.0 * q1, scale, octaves, lacunarity, gain)
 
-        # New noise generator that uses the pattern function and adds random offsets.
         def generate_pattern_noise(size=(512, 512), scale=80, octaves=5, lacunarity=2.0, gain=0.5,
                                 saturation=1.5, brightness=1, seed=None):
-            """Generate a colored, nonstructural noise image using a pattern-based fractal algorithm with random offsets."""
+            """
+            Generate colored noise image using domain-warped fractal noise and random offsets.
+            """
             width, height = size
             img = np.zeros((height, width, 3), dtype=np.uint8)
-
-            # Optionally use a provided seed or system randomness.
             rng = random.Random(seed)
-
-            # Create random offsets that are applied uniformly across the image.
             offset_x = rng.uniform(-1000, 1000)
             offset_y = rng.uniform(-1000, 1000)
-            
+
             for i in range(height):
                 for j in range(width):
-                    # Apply random offsets so the pattern varies each run.
                     x = i + offset_x
                     y = j + offset_y
-                    
-                    # Compute a noise value for each channel with slight offsets.
+
                     r_val = pattern(x, y, scale, octaves, lacunarity, gain)
                     g_val = pattern(x + 100, y + 100, scale, octaves, lacunarity, gain)
                     b_val = pattern(x + 200, y + 200, scale, octaves, lacunarity, gain)
-                    
-                    # Normalize from an assumed range of [-1, 1] to [0, 1].
-                    r = (r_val + 1) / 2
-                    g = (g_val + 1) / 2
-                    b = (b_val + 1) / 2
 
-                    # Apply saturation by interpolating each channel toward the average.
+                    r, g, b = [(val + 1) / 2 for val in (r_val, g_val, b_val)]
                     avg = (r + g + b) / 3
-                    r = avg + (r - avg) * saturation
-                    g = avg + (g - avg) * saturation
-                    b = avg + (b - avg) * saturation
 
-                    # Adjust brightness.
-                    r = np.clip(r * brightness, 0, 1)
-                    g = np.clip(g * brightness, 0, 1)
-                    b = np.clip(b * brightness, 0, 1)
+                    r = np.clip(avg + (r - avg) * saturation, 0, 1) * brightness
+                    g = np.clip(avg + (g - avg) * saturation, 0, 1) * brightness
+                    b = np.clip(avg + (b - avg) * saturation, 0, 1) * brightness
 
-                    # Set the pixel in the image.
-                    img[i, j] = [int(r * 255), int(g * 255), int(b * 255)]
-            
-            # Convert the array to a PIL image and smooth out sharp transitions.
-            image = Image.fromarray(img)
-            image = image.filter(ImageFilter.GaussianBlur(radius=2))
+                    img[i, j] = [int(np.clip(r, 0, 1) * 255), int(np.clip(g, 0, 1) * 255), int(np.clip(b, 0, 1) * 255)]
+
+            image = Image.fromarray(img).filter(ImageFilter.GaussianBlur(radius=2))
             return image
 
-        # Updated preprocess_image function that now uses the new pattern-based noise with random offsets.
-        def preprocess_image(image, mask, noise_fill_image=True, seed=None):
-            """Preprocess image and optionally apply pattern-based fractal noise with random offsets to masked areas."""
-            image = image.convert("RGB")
-            
-            if noise_fill_image:
-                # Resize mask to match image and normalize.
-                mask = mask.convert("L").resize(image.size, Image.NEAREST)
-                mask_np = np.array(mask, dtype=np.float32) / 255.0
+        def measure_fade_pixels(mask_np):
+            """
+            Estimate edge fade width from a grayscale mask using gradient analysis.
+            Attempts measurement from top, right, bottom, and left.
+            Returns fallback value if no valid result is found.
+            """
+            h, w = mask_np.shape
 
-                # Generate noise image using the new fractal noise function with random seed.
+            def measure_line(line):
+                grad = np.gradient(line)
+                max_grad = np.max(grad)
+                if max_grad == 0: return None
+                half_max = max_grad / 2.0
+                indices = np.where(grad >= half_max)[0]
+                if len(indices) == 0: return None
+                return (indices[-1] - indices[0]) / 2.0
+
+            lines = [
+                mask_np[:, w // 2],                   # Top
+                mask_np[h // 2, ::-1],                # Right
+                mask_np[::-1, w // 2],                # Bottom
+                mask_np[h // 2, :]                    # Left
+            ]
+
+            for line in lines:
+                result = measure_line(line)
+                if result and result > 0:
+                    return result
+
+            return 16.0  # Fallback
+
+        def compute_fade_mask(binary_mask, fade_pixels=16):
+            """
+            Compute a smooth fade-out mask from a binary mask using distance transform.
+            Pixels within `fade_pixels` of the edge get values between 0 and 1.
+            """
+            mask_uint8 = (binary_mask * 255).astype(np.uint8)
+            dist = cv2.distanceTransform(mask_uint8, distanceType=cv2.DIST_L2, maskSize=5)
+            return np.clip(dist / fade_pixels, 0, 1)
+
+        def preprocess_image(image, mask, noise_fill_image=True, seed=None):
+            """
+            Preprocesses image with optional noise-based fill on masked areas.
+            Includes smoothing transitions and standard cropping and normalization.
+            """
+            image = image.convert("RGB")
+
+            if noise_fill_image:
+                mask = mask.convert("L").resize(image.size, Image.NEAREST)
+                mask_blur = np.array(mask, dtype=np.float32) / 255.0
+                fade_pixels = measure_fade_pixels(mask_blur)
+                print(f"Measured fade_pixels: {fade_pixels}")
+                binary_mask = (mask_blur > 0.5).astype(np.float32)
+
                 noise_img = generate_pattern_noise(size=image.size, seed=seed)
                 image_np = np.array(image)
                 noise_np = np.array(noise_img)
 
-                # Blend noise and original image in areas where mask exceeds threshold.
-                threshold = 0.5
-                mask_indices = mask_np >= threshold
+                fade_mask = compute_fade_mask(binary_mask, fade_pixels=fade_pixels)
+                fade_mask = binary_mask * fade_mask
+                fade_mask_3c = np.repeat(fade_mask[:, :, None], 3, axis=2)
+
                 alpha = 0.75
-                image_np[mask_indices] = ((1 - alpha) * image_np[mask_indices] + alpha * noise_np[mask_indices]).astype(np.uint8)
-                image = Image.fromarray(image_np)
+                blended = ((1 - alpha * fade_mask_3c) * image_np + alpha * fade_mask_3c * noise_np)
+                image = Image.fromarray(blended.astype(np.uint8))
                 image.save("noised_image.png")
-            
-            # Standard preprocessing: center crop, normalization, and tensor conversion.
+
             image = transforms.CenterCrop((image.size[1] // 64 * 64, image.size[0] // 64 * 64))(image)
             image = transforms.ToTensor()(image)
             image = image * 2 - 1  # Normalize to [-1, 1]
-            image = image.unsqueeze(0)
-            
-            return image
-        
+            return image.unsqueeze(0)
 
         def preprocess_map(map):
-            """Preprocess map as grayscale tensor with inverted values."""
+            """
+            Convert mask to normalized, inverted grayscale tensor.
+            Applies value remapping and center crop.
+            """
             map = map.convert("L")
             map = transforms.CenterCrop((map.size[1] // 64 * 64, map.size[0] // 64 * 64))(map)
             map = transforms.ToTensor()(map)
-            
-            # Linearly remap values so that values <=0.05 become 0, >=0.95 become 1, with interpolation in between.
             map = (map - 0.05) / (0.95 - 0.05)
             map = torch.clamp(map, 0.0, 1.0)
-            
-            map = 1.0 - map  # Invert map
-            return map
+            return 1.0 - map
 
-        # Keep an original copy of latent image.
+        # --------------------------------------------
+        # APPLY PREPROCESSING
+        # --------------------------------------------
+
+        # Prepare original image with optional noise fill
         original_image_tensor = preprocess_image(image, mask, noise_fill_image=noise_fill_image).to(device)
         image = original_image_tensor.clone().to(device)
 
-        # Prepare masks by thresholding map with timesteps.
+        # Prepare mask as rescaled tensor map
         map = preprocess_map(mask).to(device)
         map = torchvision.transforms.Resize(
             tuple(s // self.vae_scale_factor for s in original_image_tensor.shape[2:]), antialias=None
         )(map)
 
+        # Generate latent tensor with noise
         original_with_noise = self.prepare_latents(
             original_image_tensor, timesteps, batch_size, num_images_per_prompt, prompt_embeds.dtype, device, generator
         )
 
+        # Create thresholded masks over timesteps
         thresholds = torch.arange(num_inference_steps, dtype=map.dtype) / num_inference_steps
         thresholds = thresholds.unsqueeze(1).unsqueeze(1).to(device)
         masks = map > (thresholds + (denoising_start or 0))
+
+
 
         # 6. Prepare latent variables.
         latents = self.prepare_latents(

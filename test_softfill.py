@@ -19,20 +19,18 @@ image = Image.open("image.png")
 mask = Image.open("mask.png")
 
 # INPUT PROMPTS
-prompt = ""
-negative_prompt = ""
+prompt = "selfie photo of pretty girl, with blue bikini top, blue eyes, at beautiful white tropical bali villa pool"
+negative_prompt = "deformed, bad anatomy, from above, fat, lowres, lower body, nude, nsfw, nipples, mirror, holding phone"
 
 # RUN PIPELINE
 output = pipeline(
     prompt=prompt,
     negative_prompt=negative_prompt,
-    # Both the image and mask should be PIL.
     image=image,
     mask=mask,
-    # Defaults to true. Adds noise to the image at the mask's >0.8 area.
-    noise_fill_image=True, # If your UI allows for drawing on the image, you probably want this to be False in that case.
-    num_inference_steps=40,
-    guidance_scale=3,
+    noise_fill_image=True, # If you are attempting to modify existing content, this should be False. If you have drawn the desired object onto the image already, this should be False.
+    num_inference_steps=32,
+    guidance_scale=4,
     strength=0.8,
 ).images[0]
 

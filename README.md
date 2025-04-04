@@ -1,20 +1,17 @@
 # SoftFill Pipeline
 
-Notice! This is only the initial commit of this pipeline, it is by no means functioning properly yet... Check back in a few days.
+SoftFill is a Diffusers Pipeline based on Differential Diffusion, implementing some input and preprocessing modifications which allow it to behave more like "soft inpainting" without requiring any extra inference steps. The small addition of a nondeterministic fluidlike noise fill is surprisingly good at guiding the img2img process toward producing an output in the masked region with a similar shape to the mask.
 
-SoftFill is a diffusers pipeline that integrates established inpainting and differential diffusion techniques to generate and refine images. This pipeline is designed to leverage an InPaint phase for generating rough content and a DiffDiff phase for refining and blending that content seamlessly with the original image.
+Differential Diffusion is proposed and developed by https://github.com/exx8 <br>
+Standard differential img2img pipeline can be found at https://github.com/huggingface/diffusers/blob/main/examples/community/pipeline_stable_diffusion_xl_differential_img2img.py
 
-This is modified from the base pipeline -> Diffusers 'pipeline_stable_diffusion_xl_inpaint.py'. Implementing Differential Diffusion, which is a map-gated img2img method proposed by https://github.com/exx8
-
-## Overview
-
-SoftFill operates in two primary phases:
-
-- **Inpainting Phase:**  
-  This phase uses a standard inpainting method to produce a rough output. The process begins by masking the input image. The mask is converted into a tensor and binarized to clearly indicate regions for modification. The inpainting model then generates new content based on the provided prompt.
-
-- **DiffDiff Phase:**  
-  After the initial inpainting, a derivative map is computed from the original mask. This map is inverted and resized to the latent resolution. The DiffDiff phase applies a map-gated img2img process where per-step thresholds are calculated over the denoising steps. Binary masks derived from these thresholds are used to guide the refining and blending of the inpainted content with the original image, ensuring smooth integration.
+#### Modifications from the original DiffDiff pipeline:
+- Accepts an "image" and "mask" in PIL format.
+- The mask should be a standard blurred mask, where white areas represent the inpaint area.
+- The pipeline preprocesses the image to generate a randomly warped perlin noise in the >0.5 mask area and pastes that noise onto the image.
+- The noise is applied by default and is optional; "noise_fill_image=True".
+- The noise has an opacity of 0.75, allowing the img2img processes to still get some background context if needed.
+- The noise has an edge fade which attempts to be half the mask's blur radius.
 
 ## Test the Pipeline
 
@@ -22,49 +19,54 @@ SoftFill operates in two primary phases:
 ```
 └── 📁any-folder
     └── pipeline_stable_diffusion_xl_softfill.py
-    └── test_sdxl_softfill.py
+    └── test_softfill.py
     └── setup.sh
     └── any-sdxl-model.safetensors
     └── image.png
-    └── mask_image.png
+    └── mask.png
 ```
+
 2. **Run the Setup file:**
-  ```bash
-  bash setup.sh
-  ```
+```bash
+bash setup.sh
+```
 Note: You may need to use "python3" instead of "python" in 'setup.sh'.
 
-3. **Add Model to 'test_sdxl_softfill.py':**
-  ```python
-  pipeline = StableDiffusionXLSoftfillPipeline.from_single_file(
-  --> "any-sdxl-model.safetensors", <--
-      torch_dtype=torch_dtype,
-      use_safetensors=True,
-  ).to(device)
-  ```
+3. **Add Model to 'test_softfill.py':**
+```python
+pipeline = StableDiffusionXLSoftfillPipeline.from_single_file(
+--> "any-sdxl-model.safetensors", <--
+    torch_dtype=torch_dtype,
+    use_safetensors=True,
+).to(device)
+```
 
-4. **Add your image.png:** The image you want to modify.
-![image.png](image.png)
-
-5. **Add your mask_image.png:** A blurred mask of where you want to modify.
-![mask_image.png](mask_image.png)
-
-6. **Add your Prompt in 'test_sdxl_softfill.py':**
-  ```python
-  prompt = "describe what you want to see in the masked area"
-  negative_prompt = "describe what you do NOT want to see in the masked area"
-  ```
+4. **Add your Prompt in 'test_softfill.py':**
+```python
+prompt = "describe what you want to see in the masked area"
+negative_prompt = "describe what you do NOT want to see in the masked area"
+```
 Note: Only describe within masked area.
 
-7. **Activate your Virtual Environment':**
-  ```bash
-  source .venv/bin/activate
-  ```
+5. **Activate your Virtual Environment':**
+```bash
+source .venv/bin/activate
+```
 
-8. **Run the 'test_sdxl_softfill.py':**
-  ```bash
-  python test_sdxl_softfill.py
-  ```
+7. **Run the 'test_softfill.py':**
+```bash
+python test_softfill.py
+```
 
-9. **An example Result:**
-![result.png](result.png)
+## Example Image Process
+**Model Used:** https://civitai.com/models/277058?modelVersionId=1522905 <br>
+**prompt=** selfie photo of pretty girl, with blue bikini top, blue eyes, at beautiful white tropical bali villa pool <br>
+**negative_prompt=** deformed, bad anatomy, from above, fat, lowres, lower body, nude, nsfw, nipples, mirror, holding phone <br>
+**num_inference_steps=** 32 <br>
+**guidance_scale=** 4, <br>
+**strength=** 0.8, <br>
+**noise_fill_image=** True,
+
+| Image | Mask | Noised | Result |
+|----------------|------|-------------------|---------------|
+| ![original.png](image.png) | ![mask.png](mask.png) | ![noised_image.png](noised_image.png) | ![result.png](result.png) |
