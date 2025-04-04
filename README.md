@@ -1,6 +1,6 @@
 # SoftFill Pipeline
 
-SoftFill is a Diffusers Pipeline based on Differential Diffusion, implementing some input and preprocessing modifications which allow it to behave more like "soft inpainting" without requiring any extra inference steps. The small addition of a nondeterministic fluidlike noise fill is surprisingly good at guiding the img2img process toward producing an output in the masked region with a similar shape to the mask.
+SoftFill is a Diffusers pipeline based on Differential Diffusion, incorporating input and preprocessing modifications that enable it to function more like "soft inpainting"—without requiring additional inference steps. A small addition of nondeterministic, fluid-like noise fill proves surprisingly effective at guiding the img2img process to produce outputs within the masked region that align closely with the mask's shape. I tested a variety of noise patterns, opacities, edge fades, and other parameters, and found this configuration to yield the best results so far. If I discover an approach that performs better, I’ll update the pipeline’s preprocessing accordingly.
 
 Differential Diffusion is proposed and developed by https://github.com/exx8 <br>
 Standard differential img2img pipeline can be found at https://github.com/huggingface/diffusers/blob/main/examples/community/pipeline_stable_diffusion_xl_differential_img2img.py
