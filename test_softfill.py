@@ -19,8 +19,8 @@ image = Image.open("image.png")
 mask = Image.open("mask.png")
 
 # INPUT PROMPTS
-prompt = "photo of pretty girl, age 20, blonde hair, blue eyes and yellow tropical dress, at a bali villa with the pool and villa behind her"
-negative_prompt = "closeup, nipples, nude, fat, lowres, worst quality, studio lighting"
+prompt = ""
+negative_prompt = ""
 
 # RUN PIPELINE
 output = pipeline(
