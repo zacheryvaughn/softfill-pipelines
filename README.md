@@ -5,13 +5,16 @@ SoftFill is a Diffusers pipeline based on Differential Diffusion, incorporating 
 Differential Diffusion is proposed and developed by https://github.com/exx8 <br>
 Standard differential img2img pipeline can be found at https://github.com/huggingface/diffusers/blob/main/examples/community/pipeline_stable_diffusion_xl_differential_img2img.py
 
-#### Modifications from the original DiffDiff pipeline:
+#### Modifications of DiffDiff:
 - Accepts an "image" and "mask" in PIL format.
 - The mask should be a standard blurred mask, where white areas represent the inpaint area.
 - The pipeline preprocesses the image to generate a randomly warped perlin noise in the >0.5 mask area and pastes that noise onto the image.
-- The noise is applied by default and is optional; "noise_fill_image=True".
 - The noise has an opacity of 0.75, allowing the img2img processes to still get some background context if needed.
 - The noise has an edge fade which attempts to be half the mask's blur radius.
+
+#### Additional Notes:
+- The noise is applied by default and is optional; "noise_fill_image=True". If you are attempting to modify existing content, this should be False. If you have drawn the desired object onto the image already, this should be False.
+- Experiment with different "strength" values from 0.6 to 1.0, gradually increasing the strength until the noise is no longer visible. Increasing strength can also produce a more saturated/contrasted result. But generally, the lowest possible strength is ideal.
 
 ## Test the Pipeline
 
