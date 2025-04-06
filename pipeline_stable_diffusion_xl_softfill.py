@@ -1333,7 +1333,7 @@ class StableDiffusionXLSoftFillPipeline(
                 alpha = 0.75
                 blended = ((1 - alpha * fade_mask_3c) * image_np + alpha * fade_mask_3c * noise_np)
                 image = Image.fromarray(blended.astype(np.uint8))
-                image.save("noised_image.png")
+                # image.save("noised_image.png")
 
             image = transforms.CenterCrop((image.size[1] // 64 * 64, image.size[0] // 64 * 64))(image)
             image = transforms.ToTensor()(image)

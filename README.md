@@ -72,4 +72,4 @@ python test_softfill.py
 
 | Image | Mask | Noised | Result |
 |----------------|------|-------------------|---------------|
-| ![original.png](image.png) | ![mask.png](mask.png) | ![noised_image.png](noised_image.png) | ![result.png](result.png) |
+| ![original.png](examples/image.png) | ![mask.png](examples/mask.png) | ![noised_image.png](examples/noised_image.png) | ![result.png](examples/result.png) |
