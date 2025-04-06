@@ -1,4 +1,6 @@
-python3 -m venv .venv && \
+# Windows python
+# Mac/Linux python3
+python -m venv .venv && \
 source .venv/bin/activate && \
 pip install --upgrade pip && \
 pip cache purge && \
