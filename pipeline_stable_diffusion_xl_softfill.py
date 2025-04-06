@@ -1335,7 +1335,7 @@ class StableDiffusionXLSoftFillPipeline(
                 image = Image.fromarray(blended.astype(np.uint8))
                 # image.save("noised_image.png")
 
-            image = transforms.CenterCrop((image.size[1] // 64 * 64, image.size[0] // 64 * 64))(image)
+            image = transforms.CenterCrop((image.size[1] // 8 * 8, image.size[0] // 8 * 8))(image)
             image = transforms.ToTensor()(image)
             image = image * 2 - 1  # Normalize to [-1, 1]
             return image.unsqueeze(0)
@@ -1346,7 +1346,7 @@ class StableDiffusionXLSoftFillPipeline(
             Applies value remapping and center crop.
             """
             map = map.convert("L")
-            map = transforms.CenterCrop((map.size[1] // 64 * 64, map.size[0] // 64 * 64))(map)
+            map = transforms.CenterCrop((map.size[1] // 8 * 8, map.size[0] // 8 * 8))(map)
             map = transforms.ToTensor()(map)
             map = (map - 0.05) / (0.95 - 0.05)
             map = torch.clamp(map, 0.0, 1.0)
