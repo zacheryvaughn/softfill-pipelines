@@ -37,7 +37,7 @@ Note: You may need to use "python3" instead of "python" in 'setup.sh'.
 
 3. **Add Model to 'test_softfill.py':**
 ```python
-pipeline = StableDiffusionXLSoftfillPipeline.from_single_file(
+pipeline = StableDiffusionXLSoftFillPipeline.from_single_file(
 --> "any-sdxl-model.safetensors", <--
     torch_dtype=torch_dtype,
     use_safetensors=True,
